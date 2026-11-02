@@ -480,7 +480,16 @@ async function fetchDoubanData(url) {
 }
 
 // 抽取渲染豆瓣卡片的逻辑到单独函数
-function renderDoubanCards(data, container) {
+async function renderDoubanCards(data, container) {
+    // 豆瓣图床要求 Referer 为豆瓣域名，浏览器端无法伪造，封面统一走本站代理加载
+    let coverAuth = '';
+    try {
+        const hash = await window.ProxyAuth?.getPasswordHash?.();
+        if (hash) coverAuth = `?auth=${encodeURIComponent(hash)}`;
+    } catch (e) {
+        console.warn('获取代理鉴权失败，豆瓣封面可能无法加载:', e);
+    }
+
     // 创建文档片段以提高性能
     const fragment = document.createDocumentFragment();
     
@@ -508,19 +517,16 @@ function renderDoubanCards(data, container) {
                 .replace(/</g, '&lt;')
                 .replace(/>/g, '&gt;');
             
-            // 处理图片URL
-            // 1. 直接使用豆瓣图片URL (豆瓣图床要求 Referer 非空，使用 origin 策略)
+            // 处理图片URL：走本站代理，由服务端携带豆瓣 Referer 请求，绕过图床防盗链
             const originalCoverUrl = item.cover;
-            
-            // 2. 也准备代理URL作为备选
-            const proxiedCoverUrl = PROXY_URL + encodeURIComponent(originalCoverUrl);
+            const proxiedCoverUrl = PROXY_URL + encodeURIComponent(originalCoverUrl) + coverAuth;
             
             // 为不同设备优化卡片布局
             card.innerHTML = `
                 <div class="relative w-full aspect-[2/3] overflow-hidden cursor-pointer" onclick="fillAndSearchWithDouban('${safeTitle}')">
-                    <img src="${originalCoverUrl}" alt="${safeTitle}" 
+                    <img src="${proxiedCoverUrl}" alt="${safeTitle}" 
                         class="w-full h-full object-cover transition-transform duration-500 hover:scale-110"
-                        onerror="this.onerror=null; this.src='${proxiedCoverUrl}'; this.classList.add('object-contain');"
+                        onerror="this.onerror=null; this.src='${originalCoverUrl}'; this.classList.add('object-contain');"
                         loading="lazy" referrerpolicy="origin">
                     <div class="absolute inset-0 bg-gradient-to-t from-black to-transparent opacity-60"></div>
                     <div class="absolute bottom-2 left-2 bg-black/70 text-white text-xs px-2 py-1 rounded-sm">

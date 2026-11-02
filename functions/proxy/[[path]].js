@@ -247,14 +247,31 @@ export async function onRequest(context) {
     }
 
     // 获取远程内容及其类型
+    // 豆瓣相关域名（API 与图床）要求 Referer 为豆瓣站点，浏览器端无法伪造，需由服务端补上
+    function isDoubanHost(hostname) {
+        return /(^|\.)douban\.com$|(^|\.)doubanio\.com$/i.test(hostname || '');
+    }
+
+    // 图片/音视频等内容必须按二进制读取，用 text() 会被 UTF-8 解码破坏
+    function isBinaryContentType(contentType) {
+        const type = contentType || '';
+        return /^(image|audio|video|font)\//i.test(type) ||
+            /^application\/(octet-stream|zip|x-zip-compressed|pdf)/i.test(type);
+    }
+
     async function fetchContentWithType(targetUrl) {
+        let targetHost = '';
+        try { targetHost = new URL(targetUrl).hostname; } catch (e) {}
+
         const headers = new Headers({
             'User-Agent': getRandomUserAgent(),
             'Accept': '*/*',
             // 尝试传递一些原始请求的头信息
             'Accept-Language': request.headers.get('Accept-Language') || 'zh-CN,zh;q=0.9,en;q=0.8',
-            // 尝试设置 Referer 为目标网站的域名，或者传递原始 Referer
-            'Referer': request.headers.get('Referer') || new URL(targetUrl).origin
+            // 豆瓣域名固定使用豆瓣 Referer，其余目标沿用原始 Referer 或目标站点 origin
+            'Referer': isDoubanHost(targetHost)
+                ? 'https://movie.douban.com/'
+                : (request.headers.get('Referer') || new URL(targetUrl).origin)
         });
 
         try {
@@ -269,11 +286,13 @@ export async function onRequest(context) {
                  throw new Error(`HTTP error ${response.status}: ${response.statusText}. URL: ${targetUrl}. Body: ${errorBody.substring(0, 150)}`);
             }
 
-            // 读取响应内容为文本
-            const content = await response.text();
+            // 二进制内容按 arrayBuffer 读取，文本内容按 text 读取
             const contentType = response.headers.get('Content-Type') || '';
-            logDebug(`请求成功: ${targetUrl}, Content-Type: ${contentType}, 内容长度: ${content.length}`);
-            return { content, contentType, responseHeaders: response.headers }; // 同时返回原始响应头
+            const isBinary = isBinaryContentType(contentType);
+            const content = isBinary ? await response.arrayBuffer() : await response.text();
+            const contentLength = isBinary ? content.byteLength : content.length;
+            logDebug(`请求成功: ${targetUrl}, Content-Type: ${contentType}, 内容长度: ${contentLength}`);
+            return { content, contentType, responseHeaders: response.headers, isBinary }; // 同时返回原始响应头
 
         } catch (error) {
              logDebug(`请求彻底失败: ${targetUrl}: ${error.message}`);
@@ -521,7 +540,10 @@ export async function onRequest(context) {
                     try { headers = JSON.parse(cachedData.headers); } catch(e){} // 解析头部
                     const contentType = headers['content-type'] || headers['Content-Type'] || '';
 
-                    if (isM3u8Content(content, contentType)) {
+                    if (isBinaryContentType(contentType)) {
+                        // 旧缓存可能是被 text() 破坏的二进制内容，直接跳过缓存重新请求
+                        logDebug(`缓存内容是二进制，跳过缓存重新请求: ${targetUrl}`);
+                    } else if (isM3u8Content(content, contentType)) {
                         logDebug(`缓存内容是 M3U8，重新处理: ${targetUrl}`);
                         const processedM3u8 = await processM3u8Content(targetUrl, content, 0, env);
                         return createM3u8Response(processedM3u8);
@@ -539,10 +561,10 @@ export async function onRequest(context) {
         }
 
         // --- 实际请求 ---
-        const { content, contentType, responseHeaders } = await fetchContentWithType(targetUrl);
+        const { content, contentType, responseHeaders, isBinary } = await fetchContentWithType(targetUrl);
 
         // --- 写入缓存 (KV) ---
-        if (kvNamespace) {
+        if (kvNamespace && !isBinary) {
              try {
                  const headersToCache = {};
                  responseHeaders.forEach((value, key) => { headersToCache[key.toLowerCase()] = value; });
@@ -557,7 +579,7 @@ export async function onRequest(context) {
         }
 
         // --- 处理响应 ---
-        if (isM3u8Content(content, contentType)) {
+        if (!isBinary && isM3u8Content(content, contentType)) {
             logDebug(`内容是 M3U8，开始处理: ${targetUrl}`);
             const processedM3u8 = await processM3u8Content(targetUrl, content, 0, env);
             return createM3u8Response(processedM3u8);
@@ -569,6 +591,12 @@ export async function onRequest(context) {
             finalHeaders.set("Access-Control-Allow-Origin", "*");
             finalHeaders.set("Access-Control-Allow-Methods", "GET, HEAD, POST, OPTIONS");
             finalHeaders.set("Access-Control-Allow-Headers", "*");
+            if (isBinary) {
+                // fetch 已自动解压，去掉原始压缩/长度头，避免响应头与响应体不一致
+                finalHeaders.delete('content-encoding');
+                finalHeaders.delete('content-length');
+                finalHeaders.delete('transfer-encoding');
+            }
             return createResponse(content, 200, finalHeaders);
         }
 
