@@ -254,9 +254,8 @@ export async function onRequest(context) {
 
     // 图片/音视频等内容必须按二进制读取，用 text() 会被 UTF-8 解码破坏
     function isBinaryContentType(contentType) {
-        const type = contentType || '';
-        return /^(image|audio|video|font)\//i.test(type) ||
-            /^application\/(octet-stream|zip|x-zip-compressed|pdf)/i.test(type);
+        // 仅按媒体类型判定：application/octet-stream 等仍按文本处理，避免误伤以该类型返回的 m3u8
+        return /^(image|audio|video|font)\//i.test(contentType || '');
     }
 
     async function fetchContentWithType(targetUrl) {
