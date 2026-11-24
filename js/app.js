@@ -752,9 +752,9 @@ async function search() {
                     <div class="flex h-full">
                         ${hasCover ? `
                         <div class="relative flex-shrink-0 search-card-img-container">
-                            <img src="${item.vod_pic}" alt="${safeName}" 
+                            <img src="${item.vod_pic}" data-cover-src="${item.vod_pic.replace(/"/g, '&quot;')}" alt="${safeName}" 
                                  class="h-full w-full object-cover transition-transform hover:scale-110" 
-                                 onerror="this.onerror=null; this.src='https://via.placeholder.com/300x450?text=无封面'; this.classList.add('object-contain');" 
+                                 onerror="handleCoverLoadError(this)" 
                                  loading="lazy">
                             <div class="absolute inset-0 bg-gradient-to-r from-black/30 to-transparent"></div>
                         </div>` : ''}
@@ -853,6 +853,42 @@ function hookInput() {
     input.value = '';
 }
 document.addEventListener('DOMContentLoaded', hookInput);
+
+// ===========================================================================
+// 封面图兜底（修复：搜索结果里大量封面显示为灰块 / "无封面"占位图）
+// 原因：不少图床（ok.zuidapic.com、p.bfp261112.com 等）有防盗链，浏览器直连会加载失败；
+//       同一张图走站内 /proxy 代理是能正常取到的。
+// 做法：直连失败时自动改走 /proxy 再试一次，仍然失败才显示占位图。
+// ===========================================================================
+function getCoverProxyUrl(src) {
+    try {
+        const hash = (window.__ENV__ && window.__ENV__.PASSWORD) || localStorage.getItem('proxyAuthHash') || '';
+        if (!hash) return null;
+        return PROXY_URL + encodeURIComponent(src) + '?auth=' + encodeURIComponent(hash) + '&t=' + Date.now();
+    } catch (e) {
+        return null;
+    }
+}
+
+function showCoverPlaceholder(img) {
+    img.onerror = null;
+    img.src = 'https://via.placeholder.com/300x450?text=无封面';
+    img.classList.add('object-contain');
+}
+
+function handleCoverLoadError(img) {
+    const original = img.getAttribute('data-cover-src') || img.src || '';
+    if (!img.dataset.proxyRetried && /^http/i.test(original)) {
+        const proxied = getCoverProxyUrl(original);
+        if (proxied) {
+            img.dataset.proxyRetried = '1';
+            img.onerror = function () { showCoverPlaceholder(img); };
+            img.src = proxied;
+            return;
+        }
+    }
+    showCoverPlaceholder(img);
+}
 
 // 显示详情 - 修改为支持自定义API
 async function showDetails(id, vod_name, sourceCode) {
